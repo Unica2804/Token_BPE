@@ -42,13 +42,42 @@ void BpeTrainer::train(std::vector<WordItem> &corpus_words, size_t target_vocab_
         inverted_index.erase(best_pair);
 
         // Update the inverted index
-        for (size_t w_idx : inverted_index[best_pair]) {
+        for (size_t w_idx : affected_words) {
             auto& words = corpus_words[w_idx];
             std::vector<TokenId> new_tokens;
             new_tokens.reserve(words.tokens.size());
             for (size_t i = 0; i < words.tokens.size() - 1; ++i) {
-            
+                if (i+1 < words.tokens.size() && 
+                    words.tokens[i] == best_pair.first &&
+                    words.tokens[i + 1] == best_pair.second) {
+                    
+                    if(!new_tokens.empty()) {
+                        TokenPair old_left{new_tokens.back(), words.tokens[i]};
+                        pair_frequencies[old_left] -= words.frequency;
+                    }
+                    if (i+2 < words.tokens.size()) {
+                        TokenPair old_right{words.tokens[i+1], words.tokens[i+2]};
+                        pair_frequencies[old_right] -= words.frequency;
+                    }
+
+                    new_tokens.push_back(next_token_id);
+
+                    if (new_tokens.size() >= 2) {
+                        TokenPair new_left{new_tokens[new_tokens.size() - 2], next_token_id};
+                        pair_frequencies[new_left] += words.frequency;
+                        inverted_index[new_left].insert(w_idx);
+                    }
+                    if (i + 2 < words.tokens.size()) {
+                        TokenPair new_right{next_token_id, words.tokens[i + 2]};
+                        pair_frequencies[new_right] += words.frequency;
+                        inverted_index[new_right].insert(w_idx);
+                    }
+                    ++i;
+                } else {
+                    new_tokens.push_back(words.tokens[i]);
+                }
             }
+            words.tokens = std::move(new_tokens);
         }
 
         ++next_token_id;
