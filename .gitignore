@@ -1,3 +1,5 @@
 .cache/ 
 .vscode/
 build/
+.venv/
+gpt.bpe

@@ -89,3 +89,26 @@ TEST_CASE("Repeated identical tokens merge deterministically from left-to-right"
         REQUIRE(encoder.decode(tokens) == "aaaa");
     }
 }
+
+TEST_CASE("Encoder serialization roundtrips flawlessly", "[serialization]") {
+    BpeEncoder original;
+    original.add_merge('a', 'b', 0, 256);
+    original.add_merge(256, 'c', 1, 257);
+
+    const std::filesystem::path temp_file = "test_model.bpe";
+    original.save(temp_file);
+
+    BpeEncoder loaded;
+    loaded.load(temp_file);
+    std::filesystem::remove(temp_file);
+
+    REQUIRE(loaded.vocab_size() == original.vocab_size());
+    REQUIRE(loaded.merge_count() == original.merge_count());
+
+    // Both should yield identical token sequences
+    auto orig_tokens = original.encode_chunk("abc");
+    auto loaded_tokens = loaded.encode_chunk("abc");
+
+    REQUIRE(orig_tokens == loaded_tokens);
+    REQUIRE(loaded.decode(loaded_tokens) == "abc");
+}

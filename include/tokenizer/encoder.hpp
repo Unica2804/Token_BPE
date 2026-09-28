@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 #include <unordered_map>
+#include <filesystem>
 #include <iostream>
 
 namespace tokenizer {
@@ -18,13 +19,20 @@ namespace tokenizer {
 class BpeEncoder {
     public:
         using MergeRanks = std::unordered_map<TokenPair, uint32_t, TokenPairHash>;
+        
         BpeEncoder();
+        
         void add_merge(TokenId left, TokenId right, uint32_t rank, TokenId new_token_id);
         [[nodiscard]]std::vector<TokenId> encode_chunk(std::string_view chunk) const;
         [[nodiscard]]std::string decode(const std::vector<TokenId>& tokens) const;
 
         [[nodiscard]] size_t vocab_size() const noexcept { return id_to_bytes_.size(); }
-    
+        [[nodiscard]] size_t merge_count() const noexcept {return merge_ranks_.size(); }
+
+        //Serialization apis
+        void save(const std::filesystem::path& path) const;
+        void load(const std::filesystem::path& path);
+        
     private:
         MergeRanks merge_ranks_;
         std::unordered_map<TokenId, std::string> id_to_bytes_;
