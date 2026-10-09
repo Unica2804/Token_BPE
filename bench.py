@@ -31,8 +31,9 @@ def run_benchmark():
         "frequently occurring adjacent character pairs into single atomic tokens. "
         "High performance systems leverage zero-copy views and SIMD vectorization.\n"
     )
+    raw_words = sample_paragraph.split(" ")
     num_chunks = 5000
-    chunks = [sample_paragraph * 4 for _ in range(num_chunks)]
+    chunks = raw_words * num_chunks
     
     total_bytes = sum(len(c.encode("utf-8")) for c in chunks)
     total_mb = total_bytes / (1024 * 1024)

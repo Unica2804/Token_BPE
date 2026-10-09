@@ -1,13 +1,13 @@
 #pragma once
 
-#include <cstdint>
+// #include <cstdint>
 #include "types.hpp"
 #include <string>
 #include <string_view>
 #include <vector>
 #include <unordered_map>
 #include <filesystem>
-#include <iostream>
+// #include <iostream>
 
 namespace tokenizer {
     struct ListNode {
@@ -24,6 +24,7 @@ class BpeEncoder {
         
         void add_merge(TokenId left, TokenId right, uint32_t rank, TokenId new_token_id);
         [[nodiscard]]std::vector<TokenId> encode_chunk(std::string_view chunk) const;
+        [[nodiscard]]std::vector<TokenId> encode_chunk_uncached(std::string_view chunk) const;
         [[nodiscard]]std::string decode(const std::vector<TokenId>& tokens) const;
 
         [[nodiscard]] size_t vocab_size() const noexcept { return id_to_bytes_.size(); }

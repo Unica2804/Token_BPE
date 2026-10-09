@@ -1,9 +1,12 @@
 #include "tokenizer/encoder.hpp"
+#include "tokenizer/token_cache.hpp"
 #include <fstream>
 #include "stdexcept"
+#include "tokenizer/types.hpp"
 #include <array>
 #include <limits>
 #include <iostream>
+#include <string_view>
 
 namespace tokenizer {
 
@@ -11,6 +14,8 @@ namespace tokenizer {
         constexpr std::array<char, 4> MAGIC = {'B', 'P', 'E', '1'};
         constexpr uint8_t FORMAT_VERSION = 1;
     }
+
+    static thread_local TokenCache tl_cache;
 
     BpeEncoder::BpeEncoder() {
         for (uint32_t i = 0; i < 256; ++i) {
@@ -29,6 +34,24 @@ namespace tokenizer {
     }
 
     std::vector<TokenId> BpeEncoder::encode_chunk(std::string_view chunk) const {
+        if(chunk.empty()) return {};
+
+        if(chunk.size() <= TokenCache::MAX_CACHABLE_LENGTH) {
+            if(const auto* cached = tl_cache.get(chunk)) {
+                return *cached;
+            }
+        }
+
+        auto result = encode_chunk_uncached(chunk);
+
+        if (chunk.size() <= TokenCache::MAX_CACHABLE_LENGTH) {
+            tl_cache.put(chunk,result);
+        } 
+
+        return result;
+    } 
+
+    std::vector<TokenId> BpeEncoder::encode_chunk_uncached(std::string_view chunk) const {
         if (chunk.empty()) {
             return {};
         }

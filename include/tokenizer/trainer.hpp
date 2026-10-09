@@ -1,7 +1,7 @@
 #pragma once
 
-#include "tokenizer/types.hpp"
-#include "tokenizer/encoder.hpp"
+#include "types.hpp"
+#include "encoder.hpp"
 #include <vector>
 
 namespace tokenizer {

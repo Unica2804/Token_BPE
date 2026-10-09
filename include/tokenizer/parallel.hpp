@@ -1,7 +1,7 @@
 #pragma once
 
-#include "tokenizer/encoder.hpp"
-#include "tokenizer/types.hpp"
+#include "encoder.hpp"
+#include "types.hpp"
 #include <span>
 #include <thread>
 #include <vector>

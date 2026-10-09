@@ -90,6 +90,26 @@ TEST_CASE("Repeated identical tokens merge deterministically from left-to-right"
     }
 }
 
+TEST_CASE("PretokenCache correctly memoizes and matches uncached output", "[cache]") {
+    BpeEncoder encoder;
+    encoder.add_merge('h', 'u', 0, 256);
+    encoder.add_merge(256, 'g', 1, 257);
+
+    std::string_view word = "hug";
+
+    // 1st run: Cache miss -> computes and caches
+    auto first_run = encoder.encode_chunk(word);
+    
+    // 2nd run: Cache hit -> fetched from memory
+    auto second_run = encoder.encode_chunk(word);
+
+    // Uncached direct evaluation
+    auto direct_run = encoder.encode_chunk_uncached(word);
+
+    REQUIRE(first_run == direct_run);
+    REQUIRE(second_run == direct_run);
+}
+
 TEST_CASE("Encoder serialization roundtrips flawlessly", "[serialization]") {
     BpeEncoder original;
     original.add_merge('a', 'b', 0, 256);
