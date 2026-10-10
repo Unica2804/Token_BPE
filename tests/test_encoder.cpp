@@ -110,6 +110,34 @@ TEST_CASE("PretokenCache correctly memoizes and matches uncached output", "[cach
     REQUIRE(second_run == direct_run);
 }
 
+TEST_CASE("ThreadScratchpad reliably resets across consecutive chunk calls", "[scratchpad]") {
+    BpeEncoder encoder;
+    encoder.add_merge('a', 'b', 0, 256);
+    encoder.add_merge('b', 'c', 1, 257);
+
+    std::vector<TokenId> out1;
+    encoder.encode_chunk_to_buffer("abc", out1);
+    // 'a' + 'b' -> 256; then 'c' remains
+    REQUIRE(out1.size() == 2);
+    REQUIRE(out1[0] == 256);
+    REQUIRE(out1[1] == static_cast<TokenId>('c'));
+
+    // Call with a shorter chunk: verify previous larger scratchpad nodes do not leak
+    std::vector<TokenId> out2;
+    encoder.encode_chunk_to_buffer("a", out2);
+    REQUIRE(out2.size() == 1);
+    REQUIRE(out2[0] == static_cast<TokenId>('a'));
+
+    // Call with a longer chunk
+    std::vector<TokenId> out3;
+    encoder.encode_chunk_to_buffer("ababc", out3);
+    // "ab" (256) + "ab" (256) + "c"
+    REQUIRE(out3.size() == 3);
+    REQUIRE(out3[0] == 256);
+    REQUIRE(out3[1] == 256);
+    REQUIRE(out3[2] == static_cast<TokenId>('c'));
+}
+
 TEST_CASE("Encoder serialization roundtrips flawlessly", "[serialization]") {
     BpeEncoder original;
     original.add_merge('a', 'b', 0, 256);

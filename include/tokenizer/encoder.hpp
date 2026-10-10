@@ -2,19 +2,21 @@
 
 // #include <cstdint>
 #include "types.hpp"
+#include "scratchpad.hpp"
 #include <string>
 #include <string_view>
 #include <vector>
 #include <unordered_map>
 #include <filesystem>
+#include <span>
 // #include <iostream>
 
 namespace tokenizer {
-    struct ListNode {
-    TokenId token{INVALID_TOKEN_ID};
-    int32_t prev{-1};
-    int32_t next{-1};  
-};
+//     struct ListNode {
+//     TokenId token{INVALID_TOKEN_ID};
+//     int32_t prev{-1};
+//     int32_t next{-1};  
+// };
 
 class BpeEncoder {
     public:
@@ -25,6 +27,10 @@ class BpeEncoder {
         void add_merge(TokenId left, TokenId right, uint32_t rank, TokenId new_token_id);
         [[nodiscard]]std::vector<TokenId> encode_chunk(std::string_view chunk) const;
         [[nodiscard]]std::vector<TokenId> encode_chunk_uncached(std::string_view chunk) const;
+
+        void encode_chunk_to_buffer(std::string_view chunk, std::vector<TokenId>& out) const;
+        void encode_chunk_uncached_to_buffer(std::string_view chunk, std::vector<TokenId>& out) const;
+        
         [[nodiscard]]std::string decode(const std::vector<TokenId>& tokens) const;
 
         [[nodiscard]] size_t vocab_size() const noexcept { return id_to_bytes_.size(); }

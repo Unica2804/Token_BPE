@@ -29,7 +29,8 @@ inline std::vector<std::vector<TokenId>> parallel_tokenize(
 
         workers.emplace_back([&encoder, text_chunks, &result, start, end]() {
             for (size_t i = start; i < end; ++i) {
-                result[i] = encoder.encode_chunk(text_chunks[i]);
+                result[i].reserve(std::max<size_t>(4, text_chunks[i].size()/2));
+                encoder.encode_chunk_to_buffer(text_chunks[i], result[i]);
             }
         });
 

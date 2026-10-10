@@ -7,6 +7,7 @@
 #include <limits>
 #include <iostream>
 #include <string_view>
+#include <vector>
 
 namespace tokenizer {
 
@@ -33,31 +34,33 @@ namespace tokenizer {
         bytes_to_id_[merged_bytes] = new_token_id;
     }
 
-    std::vector<TokenId> BpeEncoder::encode_chunk(std::string_view chunk) const {
-        if(chunk.empty()) return {};
+    void BpeEncoder::encode_chunk_to_buffer(std::string_view chunk, std::vector<TokenId>& out) const {
+        if(chunk.empty()) return ;
 
         if(chunk.size() <= TokenCache::MAX_CACHABLE_LENGTH) {
             if(const auto* cached = tl_cache.get(chunk)) {
-                return *cached;
+                out.insert(out.end(), cached->begin(), cached->end());
+                return;
             }
         }
 
-        auto result = encode_chunk_uncached(chunk);
+        const size_t start_offset = out.size();
+        encode_chunk_uncached_to_buffer(chunk, out);
 
         if (chunk.size() <= TokenCache::MAX_CACHABLE_LENGTH) {
-            tl_cache.put(chunk,result);
+            std::vector<TokenId> memorized(out.begin() + start_offset, out.end());
+            tl_cache.put(chunk, std::move(memorized));
         } 
-
-        return result;
     } 
 
-    std::vector<TokenId> BpeEncoder::encode_chunk_uncached(std::string_view chunk) const {
-        if (chunk.empty()) {
-            return {};
-        }
+    void BpeEncoder::encode_chunk_uncached_to_buffer(std::string_view chunk, std::vector<TokenId>& out) const {
+        if (chunk.empty()) return;
 
         const size_t n = chunk.size();
-        std::vector<ListNode> nodes(n);
+
+        g_scratchpad.reset(n);
+        auto& nodes = g_scratchpad.nodes;
+
         for (size_t i = 0; i < n; ++i) {
             nodes[i].token = static_cast<uint8_t>(chunk[i]);
             nodes[i].prev = static_cast<int32_t>(i) - 1;
@@ -72,15 +75,15 @@ namespace tokenizer {
 
             int32_t curr = 0;
             while (curr != -1 && nodes[curr].next != -1) {
-                int32_t next = nodes[curr].next;
-                TokenPair pair{nodes[curr].token, nodes[next].token};
+                int32_t nxt = nodes[curr].next;
+                TokenPair pair{nodes[curr].token, nodes[nxt].token};
                 if(auto it = merge_ranks_.find(pair); it != merge_ranks_.end()) {
                     if (it->second < lowest_rank) {
                         lowest_rank = it->second;
                         best_node_index = curr;
                     }
                 }
-                curr = next;
+                curr = nxt;
             }
             // If no valid pair was found, we are done
             if (best_node_index == -1) break;
@@ -103,14 +106,25 @@ namespace tokenizer {
             }
         }
         // Collect the final tokens
-        std::vector<TokenId> result;
         int32_t curr = 0;
         while (curr != -1) {
-            result.push_back(nodes[curr].token);
+            out.push_back(nodes[curr].token);
             curr = nodes[curr].next;
         }
+    }
+
+    std::vector<TokenId> BpeEncoder::encode_chunk(std::string_view chunk) const {
+        std::vector<TokenId> result;
+        encode_chunk_to_buffer(chunk, result);
         return result;
     }
+
+    std::vector<TokenId> BpeEncoder::encode_chunk_uncached(std::string_view chunk) const {
+        std::vector<TokenId> result;
+        encode_chunk_uncached_to_buffer(chunk, result);
+        return result;
+    }
+
     std::string BpeEncoder::decode(const std::vector<TokenId>& tokens) const {
         std::string result;
         for (TokenId token : tokens) {
