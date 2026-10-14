@@ -4,11 +4,12 @@
 #include "types.hpp"
 #include "scratchpad.hpp"
 #include <string>
+#include <array>
 #include <string_view>
 #include <vector>
 #include <unordered_map>
 #include <filesystem>
-#include <span>
+// #include <span>
 // #include <iostream>
 
 namespace tokenizer {
@@ -25,6 +26,7 @@ class BpeEncoder {
         BpeEncoder();
         
         void add_merge(TokenId left, TokenId right, uint32_t rank, TokenId new_token_id);
+        void set_byte_token(uint8_t byte_val, TokenId token_id);
         [[nodiscard]]std::vector<TokenId> encode_chunk(std::string_view chunk) const;
         [[nodiscard]]std::vector<TokenId> encode_chunk_uncached(std::string_view chunk) const;
 
@@ -44,5 +46,6 @@ class BpeEncoder {
         MergeRanks merge_ranks_;
         std::unordered_map<TokenId, std::string> id_to_bytes_;
         std::unordered_map<std::string, TokenId> bytes_to_id_;
+        std::array<TokenId, 256> byte_to_token_id{};
 };
 } // namespace tokenizer

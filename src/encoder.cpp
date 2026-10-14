@@ -1,5 +1,6 @@
 #include "tokenizer/encoder.hpp"
 #include "tokenizer/token_cache.hpp"
+#include "tokenizer/dual_cursor.hpp"
 #include <fstream>
 #include "stdexcept"
 #include "tokenizer/types.hpp"
@@ -17,6 +18,9 @@ namespace tokenizer {
     }
 
     static thread_local TokenCache tl_cache;
+
+    static thread_local std::vector<std::string_view> tl_stream_a;
+    static thread_local std::vector<std::string_view> tl_stream_b;
 
     BpeEncoder::BpeEncoder() {
         for (uint32_t i = 0; i < 256; ++i) {
@@ -62,7 +66,8 @@ namespace tokenizer {
         auto& nodes = g_scratchpad.nodes;
 
         for (size_t i = 0; i < n; ++i) {
-            nodes[i].token = static_cast<uint8_t>(chunk[i]);
+            uint8_t b = static_cast<uint8_t>(chunk[i]);
+            nodes[i].token = byte_to_token_id[b];
             nodes[i].prev = static_cast<int32_t>(i) - 1;
             nodes[i].next = static_cast<int32_t>(i) + 1;
         }
@@ -114,9 +119,23 @@ namespace tokenizer {
     }
 
     std::vector<TokenId> BpeEncoder::encode_chunk(std::string_view chunk) const {
-        std::vector<TokenId> result;
-        encode_chunk_to_buffer(chunk, result);
-        return result;
+        if(chunk.empty()) return {};
+
+        tl_stream_a.clear();
+        tl_stream_b.clear();
+
+        pre_tokenize_dual_cursor(chunk, tl_stream_a, tl_stream_b);
+
+        std::vector<TokenId> tokens;
+        tokens.reserve(chunk.size() / 3);
+        
+        for(std::string_view word : tl_stream_a) {
+            encode_chunk_to_buffer(word, tokens);
+        }
+        for(std::string_view word : tl_stream_b) {
+            encode_chunk_to_buffer(word, tokens);
+        }
+        return tokens;
     }
 
     std::vector<TokenId> BpeEncoder::encode_chunk_uncached(std::string_view chunk) const {
@@ -214,6 +233,11 @@ namespace tokenizer {
 
             id_to_bytes_[id] = bytes;
             bytes_to_id_[bytes] = id;
+
+            if (len == 1) {
+                uint8_t byte_val = static_cast<uint8_t>(bytes[0]);
+                byte_to_token_id[byte_val] = id;
+            }
         }
 
         // read merge table
