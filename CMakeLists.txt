@@ -5,11 +5,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    # -O3, native vectorization, and link-time optimization (LTO)
-    add_compile_options(-Wall -Wextra -Wpedantic -O3 -march=native)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    # Force -O3, native SIMD/SWAR instruction selection, and Link-Time Optimization (LTO)
+    add_compile_options(-Wall -Wextra -Wpedantic -O3 -march=native -flto -DNDEBUG)
+    add_link_options(-flto)
 elseif (MSVC)
-    add_compile_options(/W4 /O2 /permissive-)
+    add_compile_options(/W4 /O2 /permissive- /DNDEBUG)
 endif()
 
 # Core static library
@@ -32,7 +37,7 @@ add_executable(tokenizer_bench bench/benchmark.cpp)
 target_link_libraries(tokenizer_bench PRIVATE bpe_core)
 
 # -------------------------------------------------------------
-# Catch2 Test Suite Integration
+# Catch2 & Nanobind Integration
 # -------------------------------------------------------------
 include(CTest)
 include(FetchContent)

@@ -3,72 +3,67 @@
 #include "tokenizer/trainer.hpp"
 #include "tokenizer/parallel.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <random>
 #include <numeric>
 #include <iomanip>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <vector>
 
 using namespace tokenizer;
-
-// Helper: Generates pseudo-natural language text
-std::vector<std::string> generate_synthetic_corpus(size_t total_words, size_t chunk_count) {
-    const std::vector<std::string> dictionary = {
-        "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
-        "transformer", "attention", "token", "byte", "pair", "encoding",
-        "optimization", "throughput", "rust", "cpp20", "performance", "memory"
-    };
-
-    std::mt19937 rng(42);
-    std::uniform_int_distribution<size_t> dist(0, dictionary.size() - 1);
-
-    std::vector<std::string> chunks(chunk_count);
-    size_t words_per_chunk = total_words / chunk_count;
-
-    for (size_t c = 0; c < chunk_count; ++c) {
-        std::string chunk;
-        chunk.reserve(words_per_chunk * 7);
-        for (size_t w = 0; w < words_per_chunk; ++w) {
-            chunk += dictionary[dist(rng)];
-            chunk += " ";
-        }
-        chunks[c] = std::move(chunk);
-    }
-    return chunks;
-}
 
 int main() {
     std::cout << "========================================================\n";
     std::cout << "          BPE TOKENIZER C++20 BENCHMARK SUITE           \n";
     std::cout << "========================================================\n\n";
 
-    // 1. Data Generation (~10MB of text)
-    const size_t TOTAL_WORDS = 1'500'000;
-    const size_t NUM_CHUNKS = 10'000;
-    std::cout << "[1/4] Generating synthetic corpus (" << TOTAL_WORDS << " words)...\n";
-    
-    auto raw_chunks = generate_synthetic_corpus(TOTAL_WORDS, NUM_CHUNKS);
-    size_t total_bytes = 0;
-    for (const auto& ch : raw_chunks) total_bytes += ch.size();
-    
-    double mb_size = static_cast<double>(total_bytes) / (1024.0 * 1024.0);
-    std::cout << "      Corpus Size: " << std::fixed << std::setprecision(2) 
-              << mb_size << " MB in " << NUM_CHUNKS << " chunks.\n\n";
+    // 1. Load shakespeare.txt
+    const std::filesystem::path corpus_path = "shakespeare.txt";
+    std::ifstream file(corpus_path, std::ios::binary);
+    if (!file) {
+        std::cerr << "Failed to open " << corpus_path << "\n";
+        return 1;
+    }
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    std::string corpus = ss.str();
 
-    // 2. Training Benchmark
+    const size_t NUM_CHUNKS = 100;
+    const size_t chunk_size = (corpus.size() + NUM_CHUNKS - 1) / NUM_CHUNKS;
+    std::vector<std::string> raw_chunks;
+    raw_chunks.reserve(NUM_CHUNKS);
+    for (size_t i = 0; i < corpus.size(); i += chunk_size) {
+        raw_chunks.push_back(corpus.substr(i, chunk_size));
+    }
+
+    size_t total_bytes = corpus.size();
+    double mb_size = static_cast<double>(total_bytes) / (1024.0 * 1024.0);
+    std::cout << "[1/4] Loaded " << corpus_path << " (" << total_bytes << " bytes)\n";
+    std::cout << "      Corpus Size: " << std::fixed << std::setprecision(2)
+              << mb_size << " MB in " << raw_chunks.size() << " chunks.\n\n";
+
+    // 2. Training Benchmark (train on shakespeare.txt word frequencies)
     std::cout << "[2/4] Benchmarking Trainer...\n";
-    std::vector<WordItem> training_data = {
-        {{'t','r','a','n','s','f','o','r','m','e','r'}, 5000},
-        {{'a','t','t','e','n','t','i','o','n'}, 4000},
-        {{'t','o','k','e','n','i','z','e','r'}, 3500},
-        {{'e','n','c','o','d','i','n','g'}, 3000},
-        {{'o','p','t','i','m','i','z','a','t','i','o','n'}, 2500},
-        {{'p','e','r','f','o','r','m','a','n','c','e'}, 2000},
-        {{'t','h','e'}, 10000},
-        {{'q','u','i','c','k'}, 1200},
-        {{'b','r','o','w','n'}, 1100}
-    };
+    std::unordered_map<std::string, uint32_t> word_counts;
+    std::istringstream iss(corpus);
+    std::string word;
+    while (iss >> word) {
+        ++word_counts[word];
+    }
+    std::vector<WordItem> training_data;
+    training_data.reserve(word_counts.size());
+    for (const auto& [w, freq] : word_counts) {
+        WordItem item;
+        item.frequency = freq;
+        item.tokens.reserve(w.size());
+        for (char c : w) item.tokens.push_back(static_cast<unsigned char>(c));
+        training_data.push_back(std::move(item));
+    }
 
     BpeEncoder encoder;
     const size_t TARGET_VOCAB = 350; // 256 base bytes + 94 merges
@@ -107,54 +102,110 @@ int main() {
     // Clean up temporary model file
     std::filesystem::remove(model_path);
 
-    // 4. Inference / Encoding Benchmark
-    std::cout << "[4/4] Benchmarking Inference Throughput...\n";
+    // 4. Inference / Encoding Benchmark.
+    // Fair comparison with bench.py defaults: gpt2.bpe model, 64 KiB chunks,
+    // 2 warm-up runs, median of 5 timed runs (single-threaded + parallel).
+    std::cout << "[4/4] Benchmarking Inference Throughput (gpt2.bpe, 64 KiB chunks)...\n";
 
-    // Create string views for zero-copy parallel processing
-    std::vector<std::string_view> view_chunks;
-    view_chunks.reserve(raw_chunks.size());
-    for (const auto& ch : raw_chunks) view_chunks.emplace_back(ch);
-
-    // --- Single-Threaded Run ---
-    auto st_start = std::chrono::steady_clock::now();
-    size_t st_total_tokens = 0;
-    for (const auto& view : view_chunks) {
-        auto tokens = loaded_encoder.encode_chunk(view);
-        st_total_tokens += tokens.size();
+    const std::filesystem::path gpt2_path = "gpt2.bpe";
+    BpeEncoder gpt2_encoder;
+    try {
+        gpt2_encoder.load(gpt2_path);
+    } catch (const std::exception& e) {
+        std::cerr << "      Cannot load " << gpt2_path << ": " << e.what() << "\n";
+        return 1;
     }
-    auto st_end = std::chrono::steady_clock::now();
+    std::cout << "      Loaded " << gpt2_path << " (" << gpt2_encoder.vocab_size()
+              << " tokens, " << gpt2_encoder.merge_count() << " merges).\n";
 
-    std::chrono::duration<double> st_sec = st_end - st_start;
-    double st_mb_per_sec = mb_size / st_sec.count();
-    double st_tokens_per_sec = static_cast<double>(st_total_tokens) / st_sec.count();
+    constexpr size_t FAIR_CHUNK_SIZE = 64 * 1024; // must match bench.py --chunk-kb default
+    constexpr int WARMUP_RUNS = 2;               // must match bench.py --warmup default
+    constexpr int TIMED_RUNS = 5;                // must match bench.py --runs default
+
+    std::vector<std::string> fair_raw_chunks;
+    fair_raw_chunks.reserve((corpus.size() + FAIR_CHUNK_SIZE - 1) / FAIR_CHUNK_SIZE);
+    for (size_t i = 0; i < corpus.size(); i += FAIR_CHUNK_SIZE) {
+        fair_raw_chunks.push_back(corpus.substr(i, std::min(FAIR_CHUNK_SIZE, corpus.size() - i)));
+    }
+    std::vector<std::string_view> fair_views;
+    fair_views.reserve(fair_raw_chunks.size());
+    for (const auto& ch : fair_raw_chunks) fair_views.emplace_back(ch);
+    std::cout << "      Split into " << fair_views.size() << " chunks of ~64 KiB.\n";
+
+    auto median_of = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    auto print_times = [](const std::vector<double>& durs) {
+        std::cout << "      Times        : [";
+        for (size_t i = 0; i < durs.size(); ++i) {
+            std::cout << std::fixed << std::setprecision(4) << durs[i] << "s";
+            if (i + 1 < durs.size()) std::cout << ", ";
+        }
+        std::cout << "]\n";
+    };
+
+    // --- Single-Threaded: warm-up, then median of TIMED_RUNS ---
+    for (int w = 0; w < WARMUP_RUNS; ++w) {
+        volatile size_t sink = 0;
+        for (const auto& view : fair_views) sink += gpt2_encoder.encode_chunk(view).size();
+        (void)sink;
+    }
+    std::vector<double> st_durs;
+    st_durs.reserve(TIMED_RUNS);
+    size_t st_total_tokens = 0;
+    for (int r = 0; r < TIMED_RUNS; ++r) {
+        auto st_start = std::chrono::steady_clock::now();
+        size_t run_tokens = 0;
+        for (const auto& view : fair_views) {
+            run_tokens += gpt2_encoder.encode_chunk(view).size();
+        }
+        std::chrono::duration<double> st_sec = std::chrono::steady_clock::now() - st_start;
+        st_durs.push_back(st_sec.count());
+        if (r == 0) st_total_tokens = run_tokens;
+    }
+    double st_med = median_of(st_durs);
 
     std::cout << "   Single-Threaded:\n";
-    std::cout << "      Time Elapsed : " << st_sec.count() << " s\n";
     std::cout << "      Tokens Made  : " << st_total_tokens << " tokens\n";
+    std::cout << "      Median Speed : " << std::fixed << std::setprecision(2)
+              << (mb_size / st_med) << " MB/s\n";
     std::cout << "      Throughput   : " << std::fixed << std::setprecision(2)
-              << st_mb_per_sec << " MB/s (" 
-              << static_cast<uint64_t>(st_tokens_per_sec) << " tokens/sec)\n\n";
+              << (static_cast<double>(st_total_tokens) / st_med / 1e6) << " Mtok/s\n";
+    print_times(st_durs);
+    std::cout << "\n";
 
-    // --- Multi-Threaded Run (std::jthread) ---
-    auto mt_start = std::chrono::steady_clock::now();
-    auto mt_results = parallel_tokenize(loaded_encoder, view_chunks);
-    auto mt_end = std::chrono::steady_clock::now();
-
+    // --- Multi-Threaded (std::jthread): warm-up, then median of TIMED_RUNS ---
+    for (int w = 0; w < WARMUP_RUNS; ++w) {
+        auto warm = parallel_tokenize(gpt2_encoder, fair_views);
+        volatile size_t sink = 0;
+        for (const auto& vec : warm) sink += vec.size();
+        (void)sink;
+    }
+    std::vector<double> mt_durs;
+    mt_durs.reserve(TIMED_RUNS);
     size_t mt_total_tokens = 0;
-    for (const auto& vec : mt_results) mt_total_tokens += vec.size();
+    for (int r = 0; r < TIMED_RUNS; ++r) {
+        auto mt_start = std::chrono::steady_clock::now();
+        auto mt_results = parallel_tokenize(gpt2_encoder, fair_views);
+        std::chrono::duration<double> mt_sec = std::chrono::steady_clock::now() - mt_start;
+        mt_durs.push_back(mt_sec.count());
+        if (r == 0) {
+            for (const auto& vec : mt_results) mt_total_tokens += vec.size();
+        }
+    }
+    double mt_med = median_of(mt_durs);
 
-    std::chrono::duration<double> mt_sec = mt_end - mt_start;
-    double mt_mb_per_sec = mb_size / mt_sec.count();
-    double mt_tokens_per_sec = static_cast<double>(mt_total_tokens) / mt_sec.count();
-
-    std::cout << "   Multi-Threaded (Hardware Concurrency = " 
+    std::cout << "   Multi-Threaded (Hardware Concurrency = "
               << std::thread::hardware_concurrency() << "):\n";
-    std::cout << "      Time Elapsed : " << mt_sec.count() << " s\n";
+    std::cout << "      Tokens Made  : " << mt_total_tokens << " tokens\n";
+    std::cout << "      Median Speed : " << std::fixed << std::setprecision(2)
+              << (mb_size / mt_med) << " MB/s\n";
     std::cout << "      Throughput   : " << std::fixed << std::setprecision(2)
-              << mt_mb_per_sec << " MB/s (" 
-              << static_cast<uint64_t>(mt_tokens_per_sec) << " tokens/sec)\n";
+              << (static_cast<double>(mt_total_tokens) / mt_med / 1e6) << " Mtok/s\n";
+    print_times(mt_durs);
     std::cout << "      Speedup      : " << std::fixed << std::setprecision(2)
-              << (st_sec.count() / mt_sec.count()) << "x\n";
+              << (st_med / mt_med) << "x (median-to-median)\n";
 
     std::cout << "========================================================\n";
     return 0;

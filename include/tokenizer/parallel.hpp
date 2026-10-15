@@ -6,36 +6,40 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 
 namespace tokenizer {
 
 inline std::vector<std::vector<TokenId>> parallel_tokenize(
-    const BpeEncoder &encoder,
-    std::span<const std::string_view> text_chunks
+    const BpeEncoder& encoder,
+    std::span<const std::string_view> text_chunks,
+    unsigned int requested_threads = 0
 ) {
     const size_t num_chunks = text_chunks.size();
     std::vector<std::vector<TokenId>> result(num_chunks);
-    
-    const unsigned int hardware_threads = std::max(1u, std::thread::hardware_concurrency());
-    const size_t batch_size = (num_chunks + hardware_threads - 1) / hardware_threads;
+    if (num_chunks == 0) return result;
+
+    const unsigned int hw = requested_threads > 0
+        ? requested_threads
+        : std::max(1u, std::thread::hardware_concurrency());
+    const unsigned int num_threads = std::min<unsigned int>(hw, static_cast<unsigned int>(num_chunks));
+
+    // Dynamic atomic work-stealing index prevents thread stragglers on uneven chunks
+    std::atomic<size_t> next_chunk{0};
 
     std::vector<std::jthread> workers;
-    workers.reserve(hardware_threads);
+    workers.reserve(num_threads);
 
-    for (size_t t=0; t < hardware_threads; ++t) {
-        size_t start = t*batch_size;
-        size_t end = std::min(start + batch_size, num_chunks);
-        if (start >= end) break;
-
-        workers.emplace_back([&encoder, text_chunks, &result, start, end]() {
-            for (size_t i = start; i < end; ++i) {
-                // result[i].reserve(std::max<size_t>(4, text_chunks[i].size()/2));
+    for (unsigned int t = 0; t < num_threads; ++t) {
+        workers.emplace_back([&encoder, text_chunks, &result, &next_chunk, num_chunks]() {
+            while (true) {
+                size_t i = next_chunk.fetch_add(1, std::memory_order_relaxed);
+                if (i >= num_chunks) break;
                 result[i] = encoder.encode_chunk(text_chunks[i]);
             }
         });
-
     }
     return result;
 }
-    
-}
+
+} // namespace tokenizer

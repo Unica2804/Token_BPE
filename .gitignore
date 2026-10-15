@@ -3,3 +3,4 @@
 build/
 .venv/
 gpt.bpe
+repo_code.txt
