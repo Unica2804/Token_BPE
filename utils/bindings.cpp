@@ -8,6 +8,7 @@
 
 #include "tokenizer/encoder.hpp"
 #include "tokenizer/parallel.hpp"
+#include <span>
 
 namespace nb = nanobind;
 using namespace tokenizer;
@@ -67,5 +68,20 @@ NB_MODULE(fast_bpe, m) {
             return nb::make_tuple(tokens_arr, offsets_arr);
         }, nb::arg("chunks"), nb::arg("threads") = 0)
         
-        .def("decode", &BpeEncoder::decode, nb::arg("tokens"));
+        .def("decode", [](
+            const BpeEncoder& self,
+            nb::ndarray<const TokenId, nb::ndim<1>, nb::c_contig> tokens
+        ) {
+            nb::gil_scoped_release release;
+            return self.decode(std::span<const TokenId>(tokens.data(), tokens.size()));
+        }, nb::arg("tokens"))
+
+        .def("decode", [](
+            const BpeEncoder& self,
+            const std::vector<TokenId>& tokens
+        ) {
+            nb::gil_scoped_release release;
+            return self.decode(std::span<const TokenId>(tokens.data(), tokens.size()));
+        }, nb::arg("tokens"));
+
 }

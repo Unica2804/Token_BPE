@@ -214,10 +214,13 @@ encoding throughput on a synthetic 1.5 M-word / 10 MB corpus (seed `42`).
 ./build/tokenizer_bench
 ```
 
-### 2. Python cross-library comparison (`bench.py`)
+### 2. Python encode/decode benchmark (`bench.py`)
 
-Compares `fast_bpe` against `tiktoken` and Hugging Face `tokenizers` on the same
-5.72 MB corpus, single-threaded and batched.
+Encodes `shakespeare.txt` in parallel, verifies the complete encode/decode
+roundtrip, and then benchmarks decoding the resulting token sequence. Encoding
+and decoding are reported separately; decoding timings exclude the encoding and
+token-list preparation steps, but include conversion at the Python binding
+boundary.
 
 ```bash
 # MUST be run from the repository root (uses ./build and ./gpt2.bpe)

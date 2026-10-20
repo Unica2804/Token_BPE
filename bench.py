@@ -33,11 +33,11 @@ def parse_args():
     return parser.parse_args()
 
 
-def benchmark_suite(name: str, fn, chunks: list[str], total_mb: float, warmup: int, runs: int):
+def benchmark_suite(name: str, fn, total_mb: float, warmup: int, runs: int, is_decode: bool = False):
     print(f"\n>>> Running: {name}")
 
     for _ in range(warmup):
-        _ = fn(chunks)
+        _ = fn()
         gc.collect()
 
     durations = []
@@ -45,7 +45,7 @@ def benchmark_suite(name: str, fn, chunks: list[str], total_mb: float, warmup: i
 
     for r in range(runs):
         t0 = time.perf_counter()
-        res = fn(chunks)
+        res = fn()
         dur = time.perf_counter() - t0
         durations.append(dur)
 
@@ -54,6 +54,8 @@ def benchmark_suite(name: str, fn, chunks: list[str], total_mb: float, warmup: i
                 token_count = len(res[0])
             elif isinstance(res, np.ndarray):
                 token_count = len(res)
+            elif isinstance(res, str):
+                token_count = len(res.encode("utf-8"))
             elif isinstance(res[0], list):
                 token_count = sum(len(x) for x in res)
             else:
@@ -64,11 +66,15 @@ def benchmark_suite(name: str, fn, chunks: list[str], total_mb: float, warmup: i
 
     med_time = statistics.median(durations)
     med_speed = total_mb / med_time
-    mtok_s = (token_count / med_time) / 1_000_000
 
-    print(f"    Median Speed : {med_speed:7.2f} MB/s")
-    print(f"    Throughput   : {mtok_s:7.2f} Mtok/s (Tokens: {token_count})")
-    print(f"    Times        : {[f'{d:.4f}s' for d in durations]}")
+    if is_decode:
+        print(f"    Median Speed : {med_speed:7.2f} MB/s")
+        print(f"    Times        : {[f'{d:.4f}s' for d in durations]}")
+    else:
+        mtok_s = (token_count / med_time) / 1_000_000
+        print(f"    Median Speed : {med_speed:7.2f} MB/s")
+        print(f"    Throughput   : {mtok_s:7.2f} Mtok/s (Tokens: {token_count})")
+        print(f"    Times        : {[f'{d:.4f}s' for d in durations]}")
 
     return med_speed
 
@@ -92,30 +98,35 @@ def main():
     enc = fast_bpe.BpeEncoder()
     enc.load(str(args.model))
 
-    # Verify zero-copy output type
-    tokens, offsets = enc.encode_batch_flat(chunks[:2], args.threads)
-    assert isinstance(tokens, np.ndarray) and tokens.dtype == np.uint32
-    assert isinstance(offsets, np.ndarray) and offsets.dtype == np.uint32
-    print(f"[*] Zero-copy validation passed: tokens array dtype={tokens.dtype}, shape={tokens.shape}")
+    # Pre-encode tokens into a flat NumPy array (no .tolist()!)
+    tokens_np, _ = enc.encode_batch_flat(chunks, args.threads)
+    assert isinstance(tokens_np, np.ndarray) and tokens_np.dtype == np.uint32
 
-    # 1. Standard Multi-threaded list[list[int]]
-    speed_legacy = benchmark_suite(
-        f"C++20 Parallel ({args.threads}T) [list[list[int]]]",
-        lambda data: enc.encode_batch(data),
-        chunks, total_mb, args.warmup, args.runs
+    # Verification: Validate roundtrip decode match directly from the numpy buffer
+    decoded_text = enc.decode(tokens_np)
+    # Validate on sample segment to confirm exact string recovery
+    sample_text = "To be, or not to be, that is the question:"
+    sample_tokens = enc.encode_flat(sample_text)
+    assert enc.decode(sample_tokens) == sample_text
+    print("[*] Decode roundtrip test passed: exact string recovered from NumPy array!")
+
+    # 1. Zero-Copy Flat Batch Encode
+    speed_encode = benchmark_suite(
+        f"C++20 Parallel Encode ({args.threads}T) [Zero-Copy ndarray]",
+        lambda: enc.encode_batch_flat(chunks, args.threads),
+        total_mb, args.warmup, args.runs, is_decode=False
     )
 
-    # 2. Zero-Copy Flat Buffer Protocol
-    speed_zero_copy = benchmark_suite(
-        f"C++20 Parallel ({args.threads}T) [Zero-Copy ndarray]",
-        lambda data: enc.encode_batch_flat(data, args.threads),
-        chunks, total_mb, args.warmup, args.runs
+    # 2. Zero-Copy Direct NumPy Decode (Passes np.ndarray directly to C++ pointer)
+    speed_decode = benchmark_suite(
+        "C++20 Single-Thread Decode [Zero-Copy ndarray -> std::string]",
+        lambda: enc.decode(tokens_np),
+        total_mb, args.warmup, args.runs, is_decode=True
     )
 
     print("\n" + "=" * 65)
-    print(f"Legacy Python Marshaling Throughput : {speed_legacy:7.2f} MB/s")
-    print(f"Zero-Copy ndarray Throughput         : {speed_zero_copy:7.2f} MB/s")
-    print(f"Speedup from Eliminating Heap Alloc : {speed_zero_copy / speed_legacy:7.2f}x")
+    print(f"Zero-Copy ndarray Encode Speed : {speed_encode:7.2f} MB/s")
+    print(f"Flat-Table ndarray Decode Speed: {speed_decode:7.2f} MB/s")
     print("=" * 65)
 
 

@@ -3,6 +3,7 @@
 #include "tokenizer/dual_cursor.hpp"
 #include "tokenizer/types.hpp"
 #include <fstream>
+#include <span>
 #include <stdexcept>
 #include <array>
 #include <limits>
@@ -161,12 +162,30 @@ std::vector<TokenId> BpeEncoder::encode_chunk_uncached(std::string_view chunk) c
     return result;
 }
 
-std::string BpeEncoder::decode(const std::vector<TokenId>& tokens) const {
-    std::string result;
-    result.reserve(tokens.size() * 4);
+std::string BpeEncoder::decode(std::span<const TokenId> tokens) const {
+    if(tokens.empty()) return {};
+
+    const size_t table_size = decode_table_.size();
+
+    //Branchless decoding
+    size_t total_bytes = 0;
     for (TokenId token : tokens) {
-        if (auto it = id_to_bytes_.find(token); it != id_to_bytes_.end()) {
-            result += it->second;
+        if (token < table_size) {
+            total_bytes += decode_table_[token].size();
+        }
+    }
+    
+    std::string result;
+    result.resize(total_bytes);
+    char* dst = result.data();
+
+    // Sequential decoding via array index in O(1)
+    for (TokenId token : tokens) {
+        if (token < table_size) [[likely]] {
+            const std::string& str = decode_table_[token];
+            const size_t len = str.size();
+            std::memcpy(dst, str.data(), len);
+            dst += len;
         }
     }
     return result;
@@ -263,6 +282,7 @@ void BpeEncoder::load(const std::filesystem::path& filepath) {
 
         merge_ranks_[pair] = MergeInfo{rank, result_id};
     }
+    rebuild_decode_table();
 }
 
 } // namespace tokenizer

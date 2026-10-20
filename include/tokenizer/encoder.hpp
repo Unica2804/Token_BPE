@@ -8,6 +8,7 @@
 #include <vector>
 #include <unordered_map>
 #include <filesystem>
+#include <span>
 
 namespace tokenizer {
 
@@ -31,19 +32,31 @@ public:
     void encode_chunk_to_buffer(std::string_view chunk, std::vector<TokenId>& out) const;
     void encode_chunk_uncached_to_buffer(std::string_view chunk, std::vector<TokenId>& out) const;
 
-    [[nodiscard]] std::string decode(const std::vector<TokenId>& tokens) const;
-
+    [[nodiscard]] std::string decode(std::span<const TokenId> tokens) const;
+    [[nodiscard]] std::string decode(const std::vector<TokenId>& tokens) const {
+        return decode(std::span<const TokenId>(tokens.data(), tokens.size()));
+    }
     [[nodiscard]] size_t vocab_size() const noexcept { return id_to_bytes_.size(); }
     [[nodiscard]] size_t merge_count() const noexcept { return merge_ranks_.size(); }
 
     void save(const std::filesystem::path& path) const;
     void load(const std::filesystem::path& path);
-
-private:
+    void rebuild_decode_table() {
+        size_t max_id = 0;
+        for (const auto& [id, _]:id_to_bytes_) {
+            if (id > max_id) max_id = id;
+        }
+        decode_table_.assign(max_id + 1, "");
+        for (const auto& [id, str]:id_to_bytes_) {
+            decode_table_[id] = str;
+        }
+    }
+private:  
     MergeRanks merge_ranks_;
     std::unordered_map<TokenId, std::string> id_to_bytes_;
     std::unordered_map<std::string, TokenId> bytes_to_id_;
     std::array<TokenId, 256> byte_to_token_id{};
+    std::vector<std::string> decode_table_;
 };
 
 } // namespace tokenizer
