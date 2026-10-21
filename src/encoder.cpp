@@ -31,6 +31,8 @@ BpeEncoder::BpeEncoder() {
         bytes_to_id_[byte_str] = i;
         byte_to_token_id[i] = i; // Fixed: initialize default byte mapping!
     }
+
+    rebuild_decode_table();
 }
 
 void BpeEncoder::set_byte_token(uint8_t byte_val, TokenId token_id) {
@@ -42,6 +44,11 @@ void BpeEncoder::add_merge(TokenId left, TokenId right, uint32_t rank, TokenId n
     std::string merged_bytes = id_to_bytes_[left] + id_to_bytes_[right];
     id_to_bytes_[new_token_id] = merged_bytes;
     bytes_to_id_[merged_bytes] = new_token_id;
+
+    if (new_token_id >= decode_table_.size()) {
+        decode_table_.resize(new_token_id + 1);
+    }
+    decode_table_[new_token_id] = merged_bytes;
 }
 
 void BpeEncoder::encode_chunk_to_buffer(std::string_view word, std::vector<TokenId>& out) const {
