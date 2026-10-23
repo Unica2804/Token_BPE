@@ -38,6 +38,10 @@ persistent thread pool, and zero-copy NumPy bindings.
   microseconds (GPT-2: 50 257 tokens / 49 992 merges ≈ 1.5 MB).
 - **HF importer** — convert Hugging Face `vocab.json` + `merges.txt` into the
   `.bpe` binary.
+- **Audited 3-way benchmark** — `benchmark.py` compares `fast_bpe` against
+  OpenAI `tiktoken` and Hugging Face `tokenizers` on identical newline-aligned
+  chunks, verifies `fast_bpe`/`tiktoken` roundtrips, and pins Rust's Rayon pool
+  to the same thread count as the C++ pool.
 - **Tests** — Catch2 v3 suite (10 cases, 52 assertions) wired into CTest.
 
 ---
@@ -48,7 +52,8 @@ persistent thread pool, and zero-copy NumPy bindings.
 BPE_Tokenizer/
 ├── CMakeLists.txt              # Build system (C++20, nanobind, Catch2, CTest)
 ├── main.cpp                    # Demo executable -> build/tokenizer_cli
-├── bench.py                    # Python zero-copy encode/decode benchmark
+├── benchmark.py                # Audited 3-way Python benchmark (fast_bpe/tiktoken/HF)
+├── bench.py                    # Earlier fast_bpe-only zero-copy benchmark
 ├── bench/benchmark.cpp         # C++ benchmark suite -> build/tokenizer_bench
 ├── include/tokenizer/
 │   ├── types.hpp               # TokenId, TokenPair, hash
@@ -99,13 +104,17 @@ BPE_Tokenizer/
 | C++ compiler | C++20 (GCC, Clang, MSVC) |
 | CMake | ≥ 3.20 |
 | Python | ≥ 3.10 (with development headers) |
-| Python packages | `nanobind` (build), `numpy` (Python benchmark and ndarray fast paths) |
-| Network | First configure only (Catch2 is fetched via `FetchContent`) |
+| Python packages | `nanobind` (build), `numpy` (Python benchmarks and ndarray fast paths) |
+| Benchmark packages | `tiktoken` + `tokenizers` (optional, 3-way comparison) |
+| Network | First configure (Catch2 via `FetchContent`); first `benchmark.py` run (downloads the GPT-2 encoding for `tiktoken` / Hugging Face) |
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install nanobind numpy
+
+# Optional: enables the tiktoken / Hugging Face columns
+pip install tiktoken tokenizers
 ```
 
 ---
@@ -227,8 +236,10 @@ enc.save("model.bpe")
 
 1. **Pre-tokenize** (`swar.hpp` + `pre_tokenizer.hpp`): the text is split into
    GPT-2-style pre-tokens (letter runs, digit runs, whitespace runs,
-   contractions such as `'s` / `'re` / `'ll`, and punctuation runs). ASCII
-   classification is done 8 bytes at a time with SWAR.
+   contractions such as `'s` / `'re` / `'ll`, and punctuation runs). A trailing
+   space stays attached to the following pre-token, matching GPT-2's convention
+   for word-initial spaces. ASCII classification is done 8 bytes at a time with
+   SWAR.
 2. **Dual cursor** (`dual_cursor.hpp`): chunks longer than 256 bytes are split
    near the midpoint at a space/newline so both halves can be pre-tokenized in
    one interleaved loop without materializing an intermediate
@@ -283,38 +294,64 @@ All tests passed (52 assertions in 10 test cases)
 
 ## Benchmarks
 
-Two benchmarks ship with the project and both read `shakespeare.txt` plus
-`gpt2.bpe` from the repository root.
+The benchmarks read `shakespeare.txt` plus `gpt2.bpe` from the repository root.
 
-### 1. C++ suite (`tokenizer_bench`)
+### 1. Audited 3-way benchmark (`benchmark.py`)
 
-Loads the Shakespeare corpus (~1.06 MB), trains a 350-token model, measures
-serialization, then benchmarks single- and multi-threaded encoding of
-`gpt2.bpe` in 64 KiB chunks (2 warm-ups, median of 5 runs).
+The primary benchmark. It splits the corpus into ~64 KiB **newline-aligned**
+chunks (so no engine is penalized by mid-word or mid-indentation cuts), then
+measures single- and multi-threaded encoding plus single-threaded decoding for
+`fast_bpe`, OpenAI `tiktoken`, and Hugging Face `tokenizers`.
 
-```bash
-./build/tokenizer_bench
-```
+Fairness controls:
 
-### 2. Python zero-copy benchmark (`bench.py`)
-
-Encodes the corpus through `encode_batch_flat`, verifies the encode/decode
-roundtrip from the returned NumPy array, then benchmarks the flat batch encode
-and the zero-copy decode. Only `numpy` is required.
+- The same chunks and GPT-2 vocabulary are used for every engine (the local
+  `gpt2.bpe` for `fast_bpe`, the built-in/downloaded GPT-2 encoding for the
+  others).
+- Rust Rayon is pinned with `RAYON_NUM_THREADS` to the same hardware thread
+  count used by `PersistentThreadPool`.
+- `fast_bpe` (both boundary types) and `tiktoken` outputs are roundtrip-decoded
+  and compared to the original text before timing starts.
+- Both `fast_bpe` boundary types are measured: zero-copy `numpy.uint32`
+  ndarrays and ordinary Python `list` objects (the latter matches the
+  `tiktoken` / HF API shape).
+- `tiktoken` and `tokenizers` columns are skipped automatically if those
+  optional packages are not installed.
 
 ```bash
 # MUST be run from the repository root (uses ./build and ./gpt2.bpe)
-.venv/bin/python bench.py --chunk-kb 64 --warmup 3 --runs 7
+.venv/bin/python benchmark.py --chunk-kb 64 --warmup 3 --runs 9
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--file` | `shakespeare.txt` | Input corpus |
 | `--model` | `gpt2.bpe` | Binary model |
-| `--chunk-kb` | `64` | Chunk size in KiB |
+| `--chunk-kb` | `64` | Target chunk size in KiB (extended to the next newline) |
 | `--warmup` | `3` | Warm-up iterations |
-| `--runs` | `7` | Timed iterations (median reported) |
-| `--threads` | `os.cpu_count()` | Label only; the thread pool size is fixed at startup |
+| `--runs` | `9` | Timed iterations (median reported) |
+| `--threads` | `os.cpu_count()` | Hardware threads; also sets `RAYON_NUM_THREADS` |
+
+### 2. C++ suite (`tokenizer_bench`)
+
+Loads the Shakespeare corpus (~1.06 MB), trains a 350-token model, measures
+serialization, then benchmarks single- and multi-threaded encoding of
+`gpt2.bpe` in fixed-size 64 KiB chunks (2 warm-ups, median of 5 runs). This
+suite isolates the native C++ path from the Python FFI boundary.
+
+```bash
+./build/tokenizer_bench
+```
+
+### 3. Legacy fast_bpe-only benchmark (`bench.py`)
+
+The earlier Python script measures only `fast_bpe` (zero-copy batch encode and
+ndarray decode). It remains for quick regression checks; use `benchmark.py` for
+cross-library comparisons.
+
+```bash
+.venv/bin/python bench.py --chunk-kb 64 --warmup 3 --runs 7
+```
 
 ---
 
@@ -322,7 +359,8 @@ and the zero-copy decode. Only `numpy` is required.
 
 **Hardware:** Intel Core i5-11260H @ 2.60 GHz, 6 cores / 12 threads
 **Software:** Ubuntu (kernel 7.0.0-38), GCC 14.3.0, `-O3 -march=native -flto`,
-CMake 4.2.3, Python 3.13.14, NumPy 2.5.4
+CMake 4.2.3, Python 3.13.14, NumPy 2.5.4, `tiktoken 0.14.0`,
+`tokenizers 0.23.2`
 
 #### C++ suite output
 
@@ -331,64 +369,97 @@ CMake 4.2.3, Python 3.13.14, NumPy 2.5.4
       Corpus Size: 1.06 MB in 100 chunks.
 
 [2/4] Benchmarking Trainer...
-      Trained to 350 tokens (94 merges) in 268.79 ms.
+      Trained to 350 tokens (94 merges) in 252.12 ms.
 
 [3/4] Benchmarking Binary Serialization...
-      Model saved to "benchmark_model.bpe" (4794 bytes) in 135.82 us.
-      Model loaded (350 tokens) in 163.60 us.
+      Model saved to "benchmark_model.bpe" (4794 bytes) in 118.30 us.
+      Model loaded (350 tokens) in 153.19 us.
 
 [4/4] Benchmarking Inference Throughput (gpt2.bpe, 64 KiB chunks)...
       Loaded gpt2.bpe (50257 tokens, 49992 merges).
       Split into 18 chunks of ~64 KiB.
    Single-Threaded:
-      Tokens Made  : 331581 tokens
-      Median Speed : 34.63 MB/s
-      Throughput   : 10.80 Mtok/s
-      Times        : [0.0309s, 0.0307s, 0.0362s, 0.0257s, 0.0267s]
+      Tokens Made  : 331565 tokens
+      Median Speed : 41.81 MB/s
+      Throughput   : 13.03 Mtok/s
+      Times        : [0.0254s, 0.0251s, 0.0247s, 0.0256s, 0.0256s]
 
    Multi-Threaded (Hardware Concurrency = 12):
-      Tokens Made  : 331581 tokens
-      Median Speed : 239.33 MB/s
-      Throughput   : 74.60 Mtok/s
-      Times        : [0.0044s, 0.0043s, 0.0041s, 0.0046s, 0.0048s]
-      Speedup      : 6.91x (median-to-median)
+      Tokens Made  : 331565 tokens
+      Median Speed : 254.88 MB/s
+      Throughput   : 79.45 Mtok/s
+      Times        : [0.0043s, 0.0041s, 0.0043s, 0.0042s, 0.0038s]
+      Speedup      : 6.10x (median-to-median)
 ```
 
-#### Python zero-copy benchmark output
+#### Audited 3-way benchmark output (`benchmark.py`)
+
+Corpus: **1.06 MB** (1 115 394 bytes), **18 newline-aligned chunks** (~64 KB),
+12 hardware threads. `fast_bpe` token counts differ from `tiktoken` / HF
+because the pre-tokenizer is an independent implementation; the `fast_bpe` and
+`tiktoken` outputs were verified to roundtrip to the exact source text.
 
 ```
-[*] Loaded corpus: 1.06 MB (18 chunks of ~64 KB)
-[*] Decode roundtrip test passed: exact string recovered from NumPy array!
+==============================================================================================
+                     AUDITED 3-WAY BPE BENCHMARK (GPT-2 VOCABULARY)
+==============================================================================================
+  Corpus         : shakespeare.txt (1.06 MB | 1,115,394 bytes)
+  Chunks         : 18 newline-aligned chunks (~64 KB each)
+  Thread Pool    : 12 hardware threads (C++ PersistentThreadPool & Rust Rayon)
+==============================================================================================
 
->>> Running: C++20 Parallel Encode (12T) [Zero-Copy ndarray]
-    Median Speed :  218.17 MB/s
-    Throughput   :   68.01 Mtok/s (Tokens: 331581)
-
->>> Running: C++20 Single-Thread Decode [Zero-Copy ndarray -> std::string]
-    Median Speed :  307.87 MB/s
+==========================================================================================================
+Engine             | Op     | Thr |  Median Speed |   Throughput |   Latency |    Tokens | FFI Boundary Type
+----------------------------------------------------------------------------------------------------------
+fast_bpe (C++20)   | Encode | 12T |    239.98 MB/s |  74.80 Mtok/s |   4.43 ms |   331,572 | Zero-Copy ndarray
+fast_bpe (C++20)   | Encode | 12T |    137.40 MB/s |  42.83 Mtok/s |   7.74 ms |   331,572 | Python list[list[int]]
+tiktoken (Rust)    | Encode | 12T |     45.83 MB/s |  14.56 Mtok/s |  23.21 ms |   338,025 | Python list[list[int]]
+HF tokenizers      | Encode | 12T |     12.08 MB/s |   3.84 Mtok/s |  88.07 ms |   338,025 | Rust Encoding Batch
+fast_bpe (C++20)   | Encode | 1T  |     34.22 MB/s |  10.67 Mtok/s |  31.08 ms |   331,572 | Python list[list[int]]
+tiktoken (Rust)    | Encode | 1T  |     11.55 MB/s |   3.67 Mtok/s |  92.07 ms |   338,025 | Python list[list[int]]
+HF tokenizers      | Encode | 1T  |      2.11 MB/s |   0.67 Mtok/s | 503.41 ms |   338,025 | Rust Encoding List
+fast_bpe (C++20)   | Decode | 1T  |    341.01 MB/s | 106.30 Mtok/s |   3.12 ms |   331,572 | Zero-Copy ndarray
+fast_bpe (C++20)   | Decode | 1T  |    269.94 MB/s |  84.14 Mtok/s |   3.94 ms |   331,572 | Python list[int]
+tiktoken (Rust)    | Decode | 1T  |    117.34 MB/s |  37.29 Mtok/s |   9.07 ms |   338,025 | Python list[int]
+HF tokenizers      | Decode | 1T  |     24.93 MB/s |   7.92 Mtok/s |  42.66 ms |   338,025 | Python list[int]
+==========================================================================================================
 ```
 
-#### Summary
+#### Cross-library summary
+
+| Operation | `fast_bpe` | `tiktoken` | HF `tokenizers` |
+|---|---:|---:|---:|
+| Encode, 12 threads | **239.98 MB/s** (ndarray) · 137.40 MB/s (list) | 45.83 MB/s | 12.08 MB/s |
+| Encode, 1 thread | **34.22 MB/s** | 11.55 MB/s | 2.11 MB/s |
+| Decode, 1 thread | **341.01 MB/s** (ndarray) · 269.94 MB/s (list) | 117.34 MB/s | 24.93 MB/s |
+
+#### C++ native summary
 
 | Phase | Metric | Result |
 |---|---|---|
-| Training (Shakespeare, 350-token vocab) | 94 merges | **268.79 ms** |
-| Serialization | Save 4 794-byte model | **135.82 µs** |
-| Serialization | Load 350-token model | **163.60 µs** |
-| Encode, 1 thread | 1.06 MB / 331 581 tokens | **34.63 MB/s · 10.80 Mtok/s** |
-| Encode, 12 threads (C++, flat) | 1.06 MB | **239.33 MB/s · 74.60 Mtok/s** |
-| Encode, 12 threads (Python, ndarray) | 1.06 MB | **218.17 MB/s · 68.01 Mtok/s** |
-| Decode, 1 thread (Python, ndarray) | 1.06 MB | **307.87 MB/s** |
-| **Speedup** | encode, multi vs single | **6.91×** |
+| Training (Shakespeare, 350-token vocab) | 94 merges | **252.12 ms** |
+| Serialization | Save 4 794-byte model | **118.30 µs** |
+| Serialization | Load 350-token model | **153.19 µs** |
+| Encode, 1 thread (fixed 64 KiB chunks) | 331 565 tokens | **41.81 MB/s · 13.03 Mtok/s** |
+| Encode, 12 threads (fixed 64 KiB chunks) | 331 565 tokens | **254.88 MB/s · 79.45 Mtok/s** |
+| **Scaling** | 1 → 12 threads | **6.10×** |
 
 **Takeaways**
 
-- The persistent thread pool scales encoding **6.9×** from 1 to 12 threads,
-  reaching **239 MB/s** in C++ and **218 MB/s** through the NumPy binding.
-- The zero-copy binding retains ~91 % of native flat-batch throughput; the
-  remaining gap is the ndarray capsule/ownership setup per call.
-- Decode is faster than encode and allocation-bounded at **~308 MB/s** on a
-  single thread.
+- `fast_bpe` is fastest in every audited category: **5.2×** `tiktoken` and
+  **19.9×** Hugging Face at 12-thread encoding; **3.0×** / **16.2×** at
+  1-thread encoding.
+- Decoding with a zero-copy ndarray reaches **341 MB/s**, **2.9×** `tiktoken`
+  and **13.7×** HF; even the list-based decode path (**270 MB/s**) beats both
+  competitors.
+- The zero-copy boundary matters: ndarray encode is **1.75×** faster than
+  returning `list[list[int]]` (239.98 vs 137.40 MB/s), and ndarray decode is
+  **1.26×** faster than `list[int]`.
+- The native C++ suite scales **6.1×** from 1 to 12 threads, confirming the
+  persistent pool remains effective without Python overhead.
+- `fast_bpe` emits **331 572** tokens for this corpus versus **338 025** for
+  `tiktoken` / HF (~1.9 % fewer). Roundtrips are exact; the difference comes
+  from the independent pre-tokenizer.
 
 > Numbers are machine-specific and vary run-to-run (±5 %). Re-run the
 > benchmarks on your own hardware for comparable figures.
@@ -416,8 +487,12 @@ vocabulary, so imported models (including GPT-2) roundtrip correctly.
 - **Pre-tokenization is an approximation.** The SWAR splitter mirrors the shape
   of GPT-2's split regex (letters, digits, whitespace, contractions,
   punctuation) but is not guaranteed to match it for every edge case, such as
-  uncommon Unicode whitespace. Token ids can therefore differ from
-  `tiktoken` on unusual inputs.
+  uncommon Unicode whitespace. Token ids and counts can therefore differ from
+  `tiktoken` / Hugging Face: on `shakespeare.txt`, `fast_bpe` produces 331 572
+  tokens versus 338 025 (~1.9 % fewer) while still roundtripping exactly.
+- **Chunk boundaries matter for benchmarks.** `benchmark.py` aligns chunks to
+  newlines to avoid bisecting words; the C++ suite and `bench.py` use fixed
+  64 KiB cuts. Compare numbers produced by the same chunking strategy.
 - **The pre-token cache is direct-mapped.** Colliding words simply overwrite
   each other, and words longer than 22 bytes or producing more than 8 tokens are
   never cached. This is a speed/space trade-off, not a correctness issue.

@@ -69,6 +69,10 @@ namespace tokenizer {
             while (p < end && std::isspace(static_cast<unsigned char>(*p))) {
                 p++;
             }
+            if((p - start) > 1 && p < end && *(p-1) == ' ' && *p != '\'') {
+                p--;
+            }
+            
             cursor.ptr = p;
             return std::string_view(start, p - start);
         }
